@@ -17,6 +17,6 @@ You can modify the image path and prompts in the code.
 
 ## edit the reconstructed image by p2p
 ```
-python test_nti.py --inverse False --edit True
+python test_nti.py --inverse 0 --edit 1
 ```
 The code is still has bug: background is changed. I'm working to solve it.
