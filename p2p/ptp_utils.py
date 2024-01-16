@@ -24,6 +24,27 @@ from PIL import Image, ImageDraw, ImageFont
 from tqdm.notebook import tqdm
 
 
+def merge_images(image_list, rows=1, cols=-1):
+    # 检查输入的图像数量是否符合行列要求
+    if cols==-1 and len(image_list)%rows == 0:
+        cols = len(image_list) // rows
+    assert len(image_list) == rows * cols, "输入图像数量与指定的行列不匹配"
+
+    # 获取图像的宽度和高度
+    img_width, img_height = image_list[0].size
+
+    # 创建新的图像
+    merged_image = Image.new("RGB", (cols * img_width, rows * img_height))
+
+    # 按行列合并图像
+    for row in range(rows):
+        for col in range(cols):
+            index = row * cols + col
+            merged_image.paste(image_list[index], (col * img_width, row * img_height))
+
+    return merged_image
+
+
 def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, int] = (0, 0, 0)):
     h, w, c = image.shape
     offset = int(h * .2)
@@ -190,7 +211,7 @@ def register_attention_control(model, controller, is_controlnet=False):
         else:
             to_out = self.to_out
 
-        def forward_(hidden_states, encoder_hidden_states=None, attention_mask=None,temb=None,):
+        def forward(hidden_states, encoder_hidden_states=None, attention_mask=None,temb=None,):
             is_cross = encoder_hidden_states is not None
             if attention_mask is not None:
                 print("attention_mask:", attention_mask.shape)
@@ -249,33 +270,96 @@ def register_attention_control(model, controller, is_controlnet=False):
                 return hidden_states
 
         @torch.no_grad()
-        def forward(hidden_states, encoder_hidden_states=None, attention_mask=None,temb=None,):
-            batch_size, sequence_length, dim = hidden_states.shape
-            h = self.heads
-            q = self.to_q(hidden_states)
+        def forward_(hidden_states, encoder_hidden_states=None, attention_mask=None,temb=None,):
             is_cross = encoder_hidden_states is not None
-            encoder_hidden_states = encoder_hidden_states if is_cross else hidden_states
-            k = self.to_k(encoder_hidden_states)
-            v = self.to_v(encoder_hidden_states)
-            q = self.head_to_batch_dim(q)
-            k = self.head_to_batch_dim(k)
-            v = self.head_to_batch_dim(v)
-
-            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
-
             if attention_mask is not None:
-                attention_mask = attention_mask.reshape(batch_size, -1)
-                max_neg_value = -torch.finfo(sim.dtype).max
-                attention_mask = attention_mask[:, None, :].repeat(h, 1, 1)
-                sim.masked_fill_(~attention_mask, max_neg_value)
+                print("attention_mask:", attention_mask.shape)
+            residual = hidden_states
 
-            # attention, what we cannot get enough of
-            attn = sim.softmax(dim=-1)
-            attn = controller(attn, is_cross, place_in_unet)
-            out = torch.einsum("b i j, b j d -> b i d", attn, v)
-            out = self.batch_to_head_dim(out)
-            return to_out(out)
-        return forward
+            with torch.no_grad():
+                if self.spatial_norm is not None:
+                    hidden_states = self.spatial_norm(hidden_states, temb)
+
+                input_ndim = hidden_states.ndim
+
+                if input_ndim == 4:
+                    batch_size, channel, height, width = hidden_states.shape
+                    hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+                batch_size, sequence_length, _ = (
+                    hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+                )
+                attention_mask = self.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+                if self.group_norm is not None:
+                    hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+                if encoder_hidden_states is None:
+                    encoder_hidden_states = hidden_states
+                elif self.norm_cross:
+                    encoder_hidden_states = self.norm_encoder_hidden_states(encoder_hidden_states)
+
+                frames = len(controller)
+                p2p_batchsize = hidden_states.shape[0] // frames
+                assert p2p_batchsize >= 1
+
+                encoder_hidden_states = list(torch.chunk(encoder_hidden_states, p2p_batchsize))
+                for i in range(p2p_batchsize):
+                    encoder_hidden_states[i] = torch.chunk(encoder_hidden_states[i], frames)
+                hidden_states = list(torch.chunk(hidden_states, p2p_batchsize))
+                for i in range(p2p_batchsize):
+                    hidden_states[i] = torch.chunk(hidden_states[i], frames)
+                if attention_mask is not None:
+                    attention_mask = list(torch.chunk(attention_mask, p2p_batchsize))
+                    for i in range(p2p_batchsize):
+                        attention_mask[i] = torch.chunk(attention_mask[i], frames)
+                final_hidden_states = []
+                for i in range(frames):
+                    hidden_states_ = torch.cat([x[i] for x in hidden_states])
+                    encoder_hidden_states_ = torch.cat([x[i] for x in encoder_hidden_states])
+                    if attention_mask is not None:
+                        attention_mask_ = torch.cat([x[i] for x in attention_mask])
+                    else:
+                        attention_mask_ = None
+                    query = self.to_q(hidden_states_)
+                    key = self.to_k(encoder_hidden_states_)
+                    value = self.to_v(encoder_hidden_states_)
+
+                    query = self.head_to_batch_dim(query)
+                    key = self.head_to_batch_dim(key)
+                    value = self.head_to_batch_dim(value)
+
+                    attention_probs = self.get_attention_scores(query, key, attention_mask_)
+                    attention_probs = controller[i](attention_probs, is_cross, place_in_unet)
+
+                    hidden_states_ = torch.bmm(attention_probs, value)
+                    hidden_states_ = self.batch_to_head_dim(hidden_states_)
+                    final_hidden_states.append(hidden_states_)
+
+                tmp = []
+                for i in range(frames):
+                    tmp.append(torch.chunk(final_hidden_states[i], p2p_batchsize))
+                final_hidden_states = []
+                for i in range(p2p_batchsize):
+                    final_hidden_states.append(torch.cat([x[i] for x in tmp]))
+                hidden_states = torch.cat(final_hidden_states)
+
+                # linear proj
+                hidden_states = to_out(hidden_states)
+
+                if input_ndim == 4:
+                    hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+
+                if self.residual_connection:
+                    hidden_states = hidden_states + residual
+
+                hidden_states = hidden_states / self.rescale_output_factor
+
+                return hidden_states
+        if isinstance(controller, list):
+            return forward_
+        else:
+            return forward
 
     class DummyController:
 
@@ -312,7 +396,11 @@ def register_attention_control(model, controller, is_controlnet=False):
         elif "mid" in net[0]:
             cross_att_count += register_recr(net[1], 0, "mid")
 
-    controller.num_att_layers = cross_att_count
+    if isinstance(controller, list):
+        for i in range(len(controller)):
+            controller[i].num_att_layers = cross_att_count
+    else:
+        controller.num_att_layers = cross_att_count
 
 
 def get_word_inds(text: str, word_place: int, tokenizer):

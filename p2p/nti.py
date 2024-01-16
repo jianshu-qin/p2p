@@ -26,11 +26,13 @@ GUIDANCE_SCALE = 7.5
 # #     print("Attribute disable_xformers_memory_efficient_attention() is missing")
 # tokenizer = ldm_stable.tokenizer
 
-def load_512(image_path, left=0, right=0, top=0, bottom=0):
+def load_512(image_path, left=0, right=0, top=0, bottom=0, resize=True):
     if type(image_path) is str:
         image = np.array(Image.open(image_path))[:, :, :3]
     else:
         image = image_path
+    if not resize:
+        return image
     h, w, c = image.shape
     left = min(left, w-1)
     right = min(right, w - left - 1)
@@ -188,10 +190,10 @@ class NullInversion:
         bar.close()
         return uncond_embeddings_list
 
-    def invert(self, image_path: str, prompt: str, offsets=(0,0,0,0), num_inner_steps=10, early_stop_epsilon=1e-5, verbose=False):
+    def invert(self, image_path: str, prompt: str, offsets=(0,0,0,0), num_inner_steps=10, early_stop_epsilon=1e-5, verbose=False, resize=True):
         self.init_prompt(prompt)
         # ptp_utils.register_attention_control(self.model, None)
-        image_gt = load_512(image_path, *offsets)
+        image_gt = load_512(image_path, *offsets, resize=resize)
         if verbose:
             print("DDIM inversion...")
         image_rec, ddim_latents = self.ddim_inversion(image_gt)

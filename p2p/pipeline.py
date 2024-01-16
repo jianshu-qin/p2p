@@ -210,6 +210,8 @@ class ReconstructStableDiffusionPipeline(StableDiffusionPipeline):
         guidance_rescale: float = 0.0,
         uncond_embeddings = None,
         controller = None,
+        ref_latents = None,
+        num_inverse_steps = -1,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -361,6 +363,8 @@ class ReconstructStableDiffusionPipeline(StableDiffusionPipeline):
 
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        all_step_latents = []
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
@@ -370,6 +374,15 @@ class ReconstructStableDiffusionPipeline(StableDiffusionPipeline):
                 # modify uncondition_embeddings
                 if uncond_embeddings is not None:
                     prompt_embeds = prompt_embeds_list[i]
+
+                if num_inverse_steps != -1 and i >= num_inverse_steps:
+                    prompt_embeds = self._encode_prompt(
+                        prompt,
+                        device,
+                        num_images_per_prompt,
+                        do_classifier_free_guidance,
+
+                    )
                 # if i == 0:
                 #     print("debug:")
                 #     print(latent_model_input.shape, prompt_embeds.shape)
@@ -402,8 +415,18 @@ class ReconstructStableDiffusionPipeline(StableDiffusionPipeline):
                         callback(i, t, latents)
 
                 # p2p local blend callback:
-                if controller is not None:
-                    latents = controller.step_callback(latents)
+
+                # if controller is not None or ref_latents is not None:
+                #     if (controller is None or ref_latents is None):
+                #         if i == 0:
+                #             print("controller is None or ref_latents is None, skip the local belnd")
+                #     else:
+                #         latents = torch.cat([ref_latents[i], latents], dim=0)
+                #         latents = controller.step_callback(latents)
+                #         latents = latents[1:]
+                all_step_latents.append(latents[:])
+
+
 
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
@@ -417,13 +440,14 @@ class ReconstructStableDiffusionPipeline(StableDiffusionPipeline):
         else:
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.final_offload_hook.offload()
 
-        if not return_dict:
-            return (image, has_nsfw_concept)
+        return image, all_step_latents
+        # if not return_dict:
+        #     return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        # return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)

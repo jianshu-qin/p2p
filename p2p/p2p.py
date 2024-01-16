@@ -1,5 +1,6 @@
 import abc
 import os
+import time
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import imageio
@@ -29,18 +30,25 @@ class LocalBlend:
         mask = mask[:1] + mask
         return mask
 
-    def __call__(self, x_t, attention_store):
+    def __call__(self, x_t, attention_store, ref_attention_store):
         self.counter += 1
         if self.counter > self.start_blend:
 
             maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
-            maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
+            maps = [item.reshape(self.alpha_layers.shape[0]-1, -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
             maps = torch.cat(maps, dim=1).to(self.alpha_layers.device)
+            ref_maps = ref_attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
+            ref_maps = [item.reshape(1, -1, 1, 16, 16, MAX_NUM_WORDS) for item in ref_maps]
+            ref_maps = torch.cat(ref_maps, dim=1).to(self.alpha_layers.device)
+
+            maps = torch.cat([ref_maps, maps], dim=0)
             mask = self.get_mask(x_t, maps, self.alpha_layers, True)
             if self.substruct_layers is not None:
                 maps_sub = ~self.get_mask(x_t, maps, self.substruct_layers, False)
                 mask = mask * maps_sub
             mask = mask.float()
+            # print(mask.shape) [batchsize, 1, height//8, width//8]
+
             x_t = x_t[:1] + mask * (x_t - x_t[:1])
         return x_t
 
@@ -64,7 +72,7 @@ class LocalBlend:
             self.substruct_layers = substruct_layers.to(device)
         else:
             self.substruct_layers = None
-        self.alpha_layers = alpha_layers[1:].to(device)
+        self.alpha_layers = alpha_layers.to(device)
         self.start_blend = int(start_blend * ddim_steps)
         self.counter = 0
         self.th=th
@@ -107,14 +115,21 @@ class AttentionControl(abc.ABC):
             self.cur_step += 1
             self.between_steps()
             self.place_layers = self.init_place_layers()
+            self.store_place_layers = self.init_place_layers()
         return attn
 
     def __init__(self):
+        # 当前diffusion sample steps
         self.cur_step = 0
+        # unet attn layer数
         # init in register_attention_control()
         self.num_att_layers = -1
+        # 当前attn layer在unet中的位置
         self.cur_att_layer = 0
+        # ref_attn_store中attn layer位置
         self.place_layers = self.init_place_layers()
+        # attn_store中attn layer位置
+        self.store_place_layers = self.init_place_layers()
 
 class EmptyControl(AttentionControl):
 
@@ -130,20 +145,28 @@ class AttentionStore(AttentionControl):
                 "down_self": [],  "mid_self": [],  "up_self": []}
 
     def forward(self, attn, is_cross: bool, place_in_unet: str):
+        # print(f"cur step is {self.cur_step}")
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
         # print(key, ":", attn.shape)
         if attn.shape[1] <= 64 ** 2:  # avoid memory overhead
-            self.step_store[key].append(attn.cpu())
+            if self.is_store:
+                # 为了节省显存，存储在cpu
+                self.step_store[key].append(attn.cpu())
+            # elif attn.shape[1] <= 32 ** 2:
+            #     if len(self.attention_store[key]) <= self.place_layers[key]:
+            #         self.attention_store[key].append(attn)
+            #     else:
+            #         self.attention_store[key][self.place_layers[key]] += attn
         return attn
 
     def between_steps(self):
-        if len(self.attention_store) == 0:
-            self.attention_store = self.step_store
-        else:
-            for key in self.attention_store:
-                for i in range(len(self.attention_store[key])):
-                    self.attention_store[key][i] += self.step_store[key][i]
         if self.is_store:
+            if len(self.attention_store) == 0:
+                self.attention_store = self.step_store
+            else:
+                for key in self.attention_store:
+                    for i in range(len(self.attention_store[key])):
+                        self.attention_store[key][i] += self.step_store[key][i]
             self.all_attn_store.append(self.step_store.copy())
         self.step_store = self.get_empty_store()
 
@@ -153,11 +176,15 @@ class AttentionStore(AttentionControl):
 
     def __init__(self, tokenizer, device=0, is_store=[1]):
         super(AttentionStore, self).__init__()
+        # 每个sample step中间的attn store
         self.step_store = self.get_empty_store()
-        self.attention_store = {}
+        # 把每个step的step_store加起来
+        self.attention_store = self.get_empty_store()
         self.tokenizer = tokenizer
         self.device = device
+        # 所有step的step_store列表
         self.all_attn_store = []
+        # 是否存储all attn
         self.is_store = is_store
 
 
@@ -165,7 +192,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
 
     def step_callback(self, x_t):
         if self.local_blend is not None:
-            x_t = self.local_blend(x_t, self.attention_store)
+            x_t = self.local_blend(x_t, self.attention_store, self.ref_attention_store)
         return x_t
 
     def replace_self_attention(self, attn_base, att_replace):
@@ -175,17 +202,20 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
             return att_replace
 
     def between_steps(self):
-        if len(self.attention_store) == 0:
-            self.attention_store = self.step_store
-        else:
-            for key in self.attention_store:
-                for i in range(len(self.attention_store[key])):
-                    if self.is_store:
-                        self.attention_store[key][i] += self.step_store[key][i]
-                    elif 0 <= self.cur_step-1 < len(self.attn_store):
-                        self.attention_store[key][i] += self.attn_store[self.cur_step-1][key][i]
-                    else:
-                        print(f"wrong steps in {self.cur_step}")
+        # if len(self.attention_store) == 0:
+        #     # print(f"cur step is {self.cur_step}")
+        #     self.attention_store = self.step_store
+        #     self.ref_attention_store = self.ref_all_attn_store[0]
+        # else:
+        #     for key in self.attention_store:
+        #         for i in range(len(self.attention_store[key])):
+        #             # if self.is_store:
+        #             self.attention_store[key][i] += self.step_store[key][i]
+
+        #             #if 0 <= self.cur_step-1 < len(self.ref_all_attn_store):
+        #             self.ref_attention_store[key][i] += self.ref_all_attn_store[self.cur_step-1][key][i]
+        #             # else:
+        #             #     print(f"wrong steps in {self.cur_step}")
         if self.is_store:
             self.all_attn_store.append(self.step_store.copy())
         self.step_store = self.get_empty_store()
@@ -196,14 +226,20 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
 
     def forward(self, attn, is_cross: bool, place_in_unet: str):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
-        attn_base = self.attn_store[self.cur_step][key][self.place_layers[key]].to(attn.device)
-        # if torch.equal(attn, attn_base):
-        #     print("yes", key, self.cur_step, self.place_layers[key])
-        # else:
-        #     print(f"no!", key, self.cur_step, self.place_layers[key])
+        attn_base = self.ref_all_attn_store[self.cur_step][key][self.place_layers[key]].to(attn.device)
+        if self.local_blend and len(self.ref_attention_store[key]) <= self.store_place_layers[key] and attn_base.shape[1] <= 32 ** 2:
+            self.ref_attention_store[key].append(attn_base)
+            self.attention_store[key].append(attn)
+            self.store_place_layers[key] += 1
+        elif self.local_blend and attn_base.shape[1] <= 32 ** 2:
+            self.ref_attention_store[key][self.store_place_layers[key]] += attn_base
+            self.attention_store[key][self.store_place_layers[key]] += attn
+            self.store_place_layers[key] += 1
         super(AttentionControlEdit, self).forward(attn, is_cross, place_in_unet)
         if self.cur_step == 0:
             return attn
+
+
         if is_cross or (self.num_self_replace[0] <= self.cur_step < self.num_self_replace[1]):
             h = attn.shape[0] // (self.batch_size)
             attn = attn.reshape(self.batch_size, h, *attn.shape[1:])
@@ -228,9 +264,19 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                 attn = self.replace_self_attention(attn_base, attn_replace)
 
             attn = attn.reshape(self.batch_size * h, *attn.shape[2:])
+        # if attn.shape[1] == 16 ** 2 and is_cross:
+        #     show_single_attn(attn, self.prompts[1:], self.tokenizer, )
+        # if 1 or is_cross:
+        #     h = int(attn.shape[1] ** 0.5)
+        #     attn = attn.reshape(attn.shape[0], h, h, -1)
+        #     attn_shift = torch.zeros_like(attn, dtype=attn.dtype, device=attn.device)
+        #     attn_shift[:,:, h//8:,:] = attn[:,:,:-h//8,:]
+        #     attn = attn_shift.reshape(attn.shape[0], h**2, -1)
+        #     del attn_shift
+
         return attn
 
-    def __init__(self, attn_store, tokenizer, prompts, num_steps: int,
+    def __init__(self, ref_all_attn_store, tokenizer, prompts, num_steps: int,
                  cross_replace_steps: Union[float, Tuple[float, float], Dict[str, Tuple[float, float]]],
                  self_replace_steps: Union[float, Tuple[float, float]],
                  local_blend: Optional[LocalBlend], device: int=0, is_store: List[int]=None):
@@ -242,8 +288,10 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
             self_replace_steps = 0, self_replace_steps
         self.num_self_replace = int(num_steps * self_replace_steps[0]), int(num_steps * self_replace_steps[1])
         self.local_blend = local_blend
-        self.attn_store = attn_store
+        self.ref_all_attn_store = ref_all_attn_store
+        self.ref_attention_store = self.get_empty_store()
         self.is_store = is_store
+        self.prompts = prompts
 
 class AttentionReplace(AttentionControlEdit):
 
@@ -251,9 +299,9 @@ class AttentionReplace(AttentionControlEdit):
         self.mapper = self.mapper.to(attn_base.dtype)
         return torch.einsum('hpw,bwn->bhpn', attn_base, self.mapper)
 
-    def __init__(self, attn_store, tokenizer, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
+    def __init__(self, ref_all_attn_store, tokenizer, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
                  local_blend: Optional[LocalBlend] = None, device: int=0, is_store: List[int]=None):
-        super(AttentionReplace, self).__init__(attn_store, tokenizer, prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend,device, is_store)
+        super(AttentionReplace, self).__init__(ref_all_attn_store, tokenizer, prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend,device, is_store)
         self.device = device
         self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer).to(device)
 
@@ -374,6 +422,38 @@ def show_self_attention_comp(prompts, attention_store: AttentionStore, res: int,
         image = np.array(image)
         images.append(image)
     ptp_utils.view_images(np.concatenate(images, axis=1))
+
+def show_single_attn(attn, prompts, tokenizer, select=0, save_dir="./p2p_vis/single_attn", save_name="attn_vis.png", save_res=256):
+    print(f"attn shape is {attn.shape}")
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    tokens = tokenizer.encode(prompts[0])
+    decoder = tokenizer.decode
+    res = int(attn.shape[1] ** 0.5)
+    attn_maps = attn.reshape(len(prompts), -1, res, res, attn.shape[-1])[select]
+    print(attn_maps.shape)
+    attn_maps = attn_maps.sum(0) / attn_maps.shape[0]
+    images = []
+    for i in range(len(tokens)+5):
+        image = attn_maps[:, :, i]
+        image = 255 * image / image.max()
+        image = image.unsqueeze(-1).expand(*image.shape, 3).cpu()
+        image = image.numpy().astype(np.uint8)
+        image = np.array(Image.fromarray(image).resize((save_res, save_res)))
+        if i < len(tokens):
+            image = ptp_utils.text_under_image(image, decoder(int(tokens[i])))
+        else:
+            continue
+            # image = ptp_utils.text_under_image(image, "paddings")
+        images.append(image)
+    images = np.stack(images, axis=0)
+    os.makedirs(save_dir, exist_ok=True)
+    # save_name = os.path.join(save_dir, save_name)
+    ptp_utils.view_images(images, save_dir=save_dir, save_name=save_name)
+
+
+
+
 
 # def run_and_display(pipeline, prompts, controller, latent=None, run_baseline=False, generator=None):
 #     if run_baseline:
