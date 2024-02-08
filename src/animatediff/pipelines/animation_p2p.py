@@ -5,7 +5,6 @@ import itertools
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from safetensors.torch import load_file
 
 import numpy as np
 import torch
@@ -23,6 +22,7 @@ from diffusers.utils import (BaseOutput, deprecate, is_accelerate_available,
                              randn_tensor)
 from einops import rearrange
 from packaging import version
+from safetensors.torch import load_file
 from tqdm.rich import tqdm
 from transformers import CLIPImageProcessor, CLIPTokenizer
 
@@ -2329,14 +2329,18 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         interpolation_factor = 1,
         is_single_prompt_mode = False,
 
-        
+
         init_latents = None,
         p2p_prompts = None,
         uncondition_embeddings = None,
         controller = None,
-        ref_latents = None,
-        num_inverse_steps = -1, 
+        ref_bg_latents = None,
+        replace_bg_steps = [-1, -1],
+        ref_fg_latents = None,
+        warp_fg_steps = [-1, -1],
+        num_inverse_steps = -1,
         motion_module_path = None,
+        mask_path="",
         **kwargs,
     ):
         global C_REF_MODE
@@ -2348,7 +2352,7 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         # Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
         width = width or self.unet.config.sample_size * self.vae_scale_factor
- 
+
         sequential_mode = video_length is not None and video_length > context_frames
 
         # 1. Check inputs. Raise error if not correct
@@ -2578,9 +2582,9 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     do_classifier_free_guidance,
                     negative_prompt,
                     prompt_embeds=prompt_embeds,
-                    negative_prompt_embeds=unc,          
+                    negative_prompt_embeds=unc,
                 ))
-        elif p2p_prompts is not None:
+        elif p2p_prompts:
             prompt_embeds_list = [self._encode_prompt(
                     p2p_prompts,
                     device,
@@ -2588,11 +2592,11 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     do_classifier_free_guidance,
                     negative_prompt,
                     prompt_embeds=prompt_embeds,
-                             
+
                 )] * len(timesteps)
 
-            
-        
+
+
 
         del img2img_map
         torch.cuda.empty_cache()
@@ -2656,6 +2660,7 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             context_overlap,
         )
 
+        all_steps_latents = []
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=total_steps) as progress_bar:
@@ -2935,7 +2940,7 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     stopwatch_record("normal unet start")
 
                     __pred = []
-                    unet_batch_size = 2
+                    unet_batch_size = 1
                     for layer_index in range(0, latent_model_input.shape[0], unet_batch_size):
                         __do = []
                         if down_block_res_samples is not None:
@@ -2973,12 +2978,13 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
                         # print(f"__lat shape is{__lat.shape}")
                         # print(f"encoder_hidden_states shape is{__cur_prompt.shape}")
-                        
+
                         if p2p_prompts is not None or (uncondition_embeddings is not None and i < num_inverse_steps):
                             __cur_prompt = prompt_embeds_list[cur_i]
-                            
+
                         else:
                             __cur_prompt = __cur_prompt
+                        #print(__lat.shape)
                         pred_layer = self.unet(
                             __lat.to(self.unet.device, self.unet.dtype),
                             t,
@@ -3038,11 +3044,31 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     return_dict=False,
                 )[0]
 
+
+                # do bg/fg latents blend
+                if ref_bg_latents and controller and replace_bg_steps[0] <= cur_i < replace_bg_steps[1]:
+                    if cur_i == replace_bg_steps[0]:
+                        print(f"start replace bg at step {cur_i}")
+                    elif cur_i == replace_bg_steps[1]-1:
+                        print(f"end replace bg at step {cur_i}")
+                    latents = rearrange(latents, "b c f h w -> (b f) c h w")
+                    latents = torch.cat([ref_bg_latents[i], latents])
+                    latents = controller.step_callback(latents, mask_path=mask_path)
+                
+                    if ref_fg_latents:
+                        fg_lat = rearrange(ref_fg_latents[i], "b c f h w -> (b f) c h w")
+                        latents = torch.cat([fg_lat, latents])
+                        latents = controller.step_callback(latents, mask_path=mask_path, is_fg=True)
+
+                    latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
+
+                all_steps_latents.append(latents.detach())
+
                 latents_list = latents.chunk( noise_size )
 
-                tmp_latent = torch.zeros(
-                    latents_list[0].shape, device=latents.device, dtype=latents.dtype
-                )
+                # tmp_latent = torch.zeros(
+                #     latents_list[0].shape, device=latents.device, dtype=latents.dtype
+                # )
 
                 # print(region_list)
                 # for r_no in range(len(region_list)):
@@ -3096,15 +3122,20 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         # Convert to tensor
         if output_type == "tensor":
             video = torch.from_numpy(video)
+        
+        # for i in range(10, len(all_steps_latents), 1):
+        #     all_steps_latents[i] = self.decode_latents(all_steps_latents[i])
+        #     all_steps_latents[i] = torch.from_numpy(all_steps_latents[i])
+        
 
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.final_offload_hook.offload()
 
         if not return_dict:
-            return video
+            return video, all_steps_latents
 
-        return AnimationPipelineOutput(videos=video)
+        return AnimationPipelineOutput(videos=video), all_steps_latents
 
     def progress_bar(self, iterable=None, total=None):
         if not hasattr(self, "_progress_bar_config"):

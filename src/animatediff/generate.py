@@ -29,7 +29,8 @@ from animatediff import get_dir
 from animatediff.dwpose import DWposeDetector
 from animatediff.models.clip import CLIPSkipTextModel
 from animatediff.models.unet import UNet3DConditionModel
-from animatediff.pipelines import AnimationPipeline, load_text_embeddings
+from animatediff.pipelines import (AnimationPipeline, MyAnimationPipeline,
+                                   load_text_embeddings)
 from animatediff.pipelines.pipeline_controlnet_img2img_reference import \
     StableDiffusionControlNetImg2ImgReferencePipeline
 from animatediff.schedulers import get_scheduler
@@ -44,8 +45,6 @@ from animatediff.utils.util import (get_resized_image, get_resized_image2,
                                     prepare_dwpose, prepare_ip_adapter,
                                     prepare_motion_module, save_frames,
                                     save_imgs, save_video)
-
-from animatediff.pipelines import MyAnimationPipeline
 
 try:
     import onnxruntime
@@ -332,6 +331,7 @@ def create_pipeline(
     model_config: ModelConfig = ...,
     infer_config: InferenceConfig = ...,
     use_xformers: bool = True,
+    use_p2precontruct: bool = False,
 ) -> AnimationPipeline:
     """Create an AnimationPipeline from a pretrained model.
     Uses the base_model argument to load or download the pretrained reference pipeline model."""
@@ -363,6 +363,7 @@ def create_pipeline(
         motion_module_path=motion_module,
         subfolder="unet",
         unet_additional_kwargs=infer_config.unet_additional_kwargs,
+        load_motion=not use_p2precontruct,
     )
     feature_extractor = CLIPImageProcessor.from_pretrained(base_model, subfolder="feature_extractor")
 
@@ -438,7 +439,18 @@ def create_pipeline(
             load_motion_lora(unet, lora_path, alpha=model_config.motion_lora_map[l])
 
     logger.info("Creating AnimationPipeline...")
-    pipeline = MyAnimationPipeline(
+    if use_p2precontruct:
+        pipeline = MyAnimationPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            feature_extractor=feature_extractor,
+            controlnet_map=None,
+        )
+    else:
+        pipeline = AnimationPipeline(
         vae=vae,
         text_encoder=text_encoder,
         tokenizer=tokenizer,
@@ -1148,9 +1160,15 @@ def run_inference(
     p2p_prompts = None,
     uncondition_embeddings = None,
     controller = None,
-    ref_latents = None,
-    num_inverse_steps = -1, 
-    motion_module_path = ""
+    ref_bg_latents = None,
+    replace_bg_steps = [-1, -1],
+    ref_fg_latents = None,
+    warp_fg_steps = [-1, -1],
+    num_inverse_steps = -1,
+    motion_module_path = None,
+    save_all_steps_latents=False,
+    save_noisy_images_list=[],
+    mask_path="",
 ):
     out_dir = Path(out_dir)  # ensure out_dir is a Path
 
@@ -1179,7 +1197,57 @@ def run_inference(
     logger.info(f"{len( region_condi_list )=}")
     logger.info(f"{len( region_list )=}")
 
-    pipeline_output = pipeline(
+    if isinstance(pipeline, MyAnimationPipeline):
+        pipeline_output, all_steps_latents = pipeline(
+            negative_prompt=n_prompt,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            unet_batch_size=unet_batch_size,
+            width=width,
+            height=height,
+            video_length=duration,
+            return_dict=False,
+            context_frames=context_frames,
+            context_stride=context_stride + 1,
+            context_overlap=context_overlap,
+            context_schedule=context_schedule,
+            clip_skip=clip_skip,
+            controlnet_type_map=controlnet_type_map,
+            controlnet_image_map=controlnet_image_map,
+            controlnet_ref_map=controlnet_ref_map,
+            controlnet_max_samples_on_vram=controlnet_map["max_samples_on_vram"] if "max_samples_on_vram" in controlnet_map else 999,
+            controlnet_max_models_on_vram=controlnet_map["max_models_on_vram"] if "max_models_on_vram" in controlnet_map else 99,
+            controlnet_is_loop = controlnet_map["is_loop"] if "is_loop" in controlnet_map else True,
+            img2img_map=img2img_map,
+            ip_adapter_config_map=ip_adapter_config_map,
+            region_list=region_list,
+            region_condi_list=region_condi_list,
+            interpolation_factor=1,
+            is_single_prompt_mode=is_single_prompt_mode,
+            callback=callback,
+            callback_steps=output_map.get("preview_steps"),
+
+            init_latents = init_latents,
+            p2p_prompts = p2p_prompts,
+            uncondition_embeddings = uncondition_embeddings,
+            controller = controller,
+            ref_bg_latents = ref_bg_latents,
+            replace_bg_steps = replace_bg_steps,
+            ref_fg_latents = ref_fg_latents,
+            warp_fg_steps = warp_fg_steps,
+            num_inverse_steps = num_inverse_steps,
+            motion_module_path = motion_module_path,
+            mask_path=mask_path,
+        )
+        if save_all_steps_latents:
+            torch.save(all_steps_latents, "video_fg_all_20steps_latents.pt")
+        
+        for i in save_noisy_images_list:
+            all_steps_latents[i] = pipeline.decode_latents(all_steps_latents[i])
+            all_steps_latents[i] = torch.from_numpy(all_steps_latents[i])
+            save_frames(all_steps_latents[i], out_dir.joinpath(f"show_all/{i:02d}"), False)
+    else:
+        pipeline_output = pipeline(
         negative_prompt=n_prompt,
         num_inference_steps=steps,
         guidance_scale=guidance_scale,
@@ -1207,14 +1275,6 @@ def run_inference(
         is_single_prompt_mode=is_single_prompt_mode,
         callback=callback,
         callback_steps=output_map.get("preview_steps"),
-
-        init_latents = init_latents,
-        p2p_prompts = p2p_prompts,
-        uncondition_embeddings = uncondition_embeddings,
-        controller = controller,
-        ref_latents = ref_latents,
-        num_inverse_steps = num_inverse_steps,
-        motion_module_path = motion_module_path,
     )
     logger.info("Generation complete, saving...")
 

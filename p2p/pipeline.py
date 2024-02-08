@@ -414,16 +414,16 @@ class ReconstructStableDiffusionPipeline(StableDiffusionPipeline):
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
 
-                # p2p local blend callback:
+                # if p2p local blend callback:
 
-                # if controller is not None or ref_latents is not None:
-                #     if (controller is None or ref_latents is None):
-                #         if i == 0:
-                #             print("controller is None or ref_latents is None, skip the local belnd")
-                #     else:
-                #         latents = torch.cat([ref_latents[i], latents], dim=0)
-                #         latents = controller.step_callback(latents)
-                #         latents = latents[1:]
+                if controller is not None or ref_latents is not None:
+                    if (controller is None or ref_latents is None):
+                        if i == 0:
+                            print("controller is None or ref_latents is None, skip the local belnd")
+                    else:
+                        latents = torch.cat([ref_latents[i], latents], dim=0)
+                        latents = controller.step_callback(latents)
+                        latents = latents[1:]
                 all_step_latents.append(latents[:])
 
 

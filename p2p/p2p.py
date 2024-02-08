@@ -5,11 +5,13 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import imageio
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as nnf
 from diffusers import (ControlNetModel, StableDiffusionControlNetPipeline,
                        StableDiffusionPipeline)
 from PIL import Image
+from tqdm import tqdm
 
 from . import ptp_utils, seq_aligner
 
@@ -17,10 +19,8 @@ LOW_RESOURCE = False
 MAX_NUM_WORDS = 77
 device = torch.device("cuda:0")
 
-# 对latents的blend，可以保持背景不变
 class LocalBlend:
 
-    # 从attn_maps得到mask
     def get_mask(self, x_t, maps, alpha, use_pool):
         k = 1
         maps = (maps * alpha).sum(-1).mean(1)
@@ -32,29 +32,84 @@ class LocalBlend:
         mask = mask[:1] + mask
         return mask
 
-    def __call__(self, x_t, attention_store, ref_attention_store):
-        self.counter += 1
+
+    def __call__(self, x_t, attention_store, ref_attention_store, mask_path=None, is_fg=False):
+
+        has_save = False
+        w1_list = []
+        w2_list = []
+        # num of replacing bg/fg steps
+        total_steps = 20
+        w1_start, w1_end = 0.9, 0.1
+        w2_start, w2_end = 0.5, 0.1
+        for i in range(total_steps):
+            w1_list.append(w1_start-(w1_start-w1_end)*i/total_steps)
+            w2_list.append(w2_start-(w2_start-w2_end)*i/total_steps)
         if self.counter > self.start_blend:
+            batchsize, _, height, width = x_t.shape
+            if not mask_path:
+                maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
+                maps = [item.reshape(self.alpha_layers.shape[0]-1, -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
+                maps = torch.cat(maps, dim=1).to(self.alpha_layers.device)
+                ref_maps = ref_attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
+                ref_maps = [item.reshape(1, -1, 1, 16, 16, MAX_NUM_WORDS) for item in ref_maps]
+                ref_maps = torch.cat(ref_maps, dim=1).to(self.alpha_layers.device)
 
-            maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
-            maps = [item.reshape(self.alpha_layers.shape[0]-1, -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
-            maps = torch.cat(maps, dim=1).to(self.alpha_layers.device)
-            ref_maps = ref_attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
-            ref_maps = [item.reshape(1, -1, 1, 16, 16, MAX_NUM_WORDS) for item in ref_maps]
-            ref_maps = torch.cat(ref_maps, dim=1).to(self.alpha_layers.device)
+                maps = torch.cat([ref_maps, maps], dim=0)
+                mask = self.get_mask(x_t, maps, self.alpha_layers, True)
+                if self.substruct_layers is not None:
+                    maps_sub = ~self.get_mask(x_t, maps, self.substruct_layers, False)
+                    mask = mask * maps_sub
+            elif self.mask == None:
+                mask_list = []
+                if os.path.isdir(mask_path):
+                    from natsort import natsorted
+                    for fn in natsorted(os.listdir(mask_path)):
+                        if fn.endswith("png") or fn.endswith("jpg"):
+                            mask_list.append(os.path.join(mask_path, fn))
+                else:
+                    mask_list = [mask_path]
 
-            maps = torch.cat([ref_maps, maps], dim=0)
-            mask = self.get_mask(x_t, maps, self.alpha_layers, True)
-            if self.substruct_layers is not None:
-                maps_sub = ~self.get_mask(x_t, maps, self.substruct_layers, False)
-                mask = mask * maps_sub
-            mask = mask.float()
-            # print(mask.shape) [batchsize, 1, height//8, width//8]
+                tmp = []
+                for img_path in mask_list:
+                    mask = Image.open(img_path).resize((width, height))
+                    mask = np.array(mask).astype(np.float32) / 255.0
+                    if len(mask.shape) == 3:
+                        mask = mask[:,:,0]
+                    mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0) #
+                    tmp.append(mask)
+                if len(tmp) == 1:
+                    mask = tmp[0].repeat(batchsize-1, 1, 1, 1)
+                else:
+                    mask = torch.cat(tmp)
+                mask = mask.to(x_t.dtype).to(x_t.device)
+                self.mask = mask
+                #print(mask.shape)
+                #print(x_t.shape)
+                # [batchsize, 1, height//8, width//8]
 
-            x_t = x_t[:1] + mask * (x_t - x_t[:1])
+                # if not has_save:
+                #     for i in range(len(mask_list)):
+                #         img = mask.squeeze(1)[0].cpu().numpy()*255
+                #         img = Image.fromarray(np.uint8(img))
+                #         img.save("stylize/warp_test/local_blend_mask.png")
+                #     has_save = True
+
+            w1 = w1_list[self.counter//2]
+            w2 = w2_list[self.counter//2]
+            if not is_fg:
+                print("w1: ",w1)
+                bg, x_t = x_t[:1], x_t[1:]
+                x_t = w1 * bg + (1-w1)*x_t + w1 * self.mask * (x_t - bg)
+            else:
+                print("w2: ",w2)
+                fg, x_t = x_t[:batchsize//2], x_t[batchsize//2:]
+                fg_mask = 1.-self.mask
+                x_t = w2 * fg + (1-w2)*x_t + w2 * fg_mask * (x_t - fg)
+        self.counter += 1
         return x_t
 
-    def __init__(self, tokenizer, ddim_steps, prompts: List[str], words: [List[List[str]]], substruct_words=None, start_blend=0.2, th=(.3, .3)):
+    def __init__(self, tokenizer, ddim_steps, prompts: List[str], words: [List[List[str]]], substruct_words=None, start_blend=-1, th=(.3, .3)):
         alpha_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
         for i, (prompt, words_) in enumerate(zip(prompts, words)):
             if type(words_) is str:
@@ -78,6 +133,7 @@ class LocalBlend:
         self.start_blend = int(start_blend * ddim_steps)
         self.counter = 0
         self.th=th
+        self.mask = None
 
 class AttentionControl(abc.ABC):
 
@@ -112,8 +168,6 @@ class AttentionControl(abc.ABC):
         self.cur_att_layer += 1
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
         self.place_layers[key] += 1
-
-        # 一个sample step结束
         if self.cur_att_layer == self.num_att_layers + self.num_uncond_att_layers:
             self.cur_att_layer = 0
             self.cur_step += 1
@@ -130,9 +184,9 @@ class AttentionControl(abc.ABC):
         self.num_att_layers = -1
         # 当前attn layer在unet中的位置
         self.cur_att_layer = 0
-        # ref_attn_store[key]中attn layer位置
+        # ref_attn_store中attn layer位置
         self.place_layers = self.init_place_layers()
-        # attn_store[key]中attn layer位置
+        # attn_store中attn layer位置
         self.store_place_layers = self.init_place_layers()
 
 class EmptyControl(AttentionControl):
@@ -148,7 +202,6 @@ class AttentionStore(AttentionControl):
         return {"down_cross": [], "mid_cross": [], "up_cross": [],
                 "down_self": [],  "mid_self": [],  "up_self": []}
 
-    # 将attn存在self.step_store[key]里
     def forward(self, attn, is_cross: bool, place_in_unet: str):
         # print(f"cur step is {self.cur_step}")
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
@@ -164,7 +217,6 @@ class AttentionStore(AttentionControl):
             #         self.attention_store[key][self.place_layers[key]] += attn
         return attn
 
-    # 一个step结束，将step_store加到self.all_attn_store和self.attention_store
     def between_steps(self):
         if self.is_store:
             if len(self.attention_store) == 0:
@@ -182,26 +234,23 @@ class AttentionStore(AttentionControl):
 
     def __init__(self, tokenizer, device=0, is_store=[1]):
         super(AttentionStore, self).__init__()
-        # 每个sample step中间的attn store， 按down/mid/up_self/cross作为key区分
+        # 每个sample step中间的attn store
         self.step_store = self.get_empty_store()
-        # 把每个step的step_store加起来, 按down/mid/up_self/cross作为key区分。
-        # 用于local blend和show cross attention map
-        self.attention_store = self.get_empty_store()
+        # 把每个step的step_store加起来
+        self.attention_store = {}
         self.tokenizer = tokenizer
         self.device = device
-        # 所有steps的step_store列表
-        # 用于作为AttentionControlEdit类里提供生成过程中所有steps的attention
+        # 所有step的step_store列表
         self.all_attn_store = []
         # 是否存储all attn
         self.is_store = is_store
 
-# 使用之前生成过程中存储下的ref attn，对本次生成过程中的attn做edit
+
 class AttentionControlEdit(AttentionStore, abc.ABC):
 
-    # 如果使用blend，在每个sample step最后将latents做mask
-    def step_callback(self, x_t):
+    def step_callback(self, x_t, mask_path=None, is_fg=False):
         if self.local_blend is not None:
-            x_t = self.local_blend(x_t, self.attention_store, self.ref_attention_store)
+            x_t = self.local_blend(x_t, self.attention_store, self.ref_attention_store, mask_path, is_fg)
         return x_t
 
     def replace_self_attention(self, attn_base, att_replace):
@@ -210,7 +259,6 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         else:
             return att_replace
 
-    # 为了加快速度，AttentionControlEdit默认不存储all_attn_store
     def between_steps(self):
         # if len(self.attention_store) == 0:
         #     # print(f"cur step is {self.cur_step}")
@@ -234,14 +282,9 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
     def replace_cross_attention(self, attn_base, att_replace):
         raise NotImplementedError
 
-    # 对attn做edit
-    # self attn shape：(batchsize * head, h*w, h*w) head = 8
-    # cross attn shape：(batchsize * head, h*w, seq) seq = 77
     def forward(self, attn, is_cross: bool, place_in_unet: str):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
-        # 对应的ref attn
         attn_base = self.ref_all_attn_store[self.cur_step][key][self.place_layers[key]].to(attn.device)
-        # 如果需要blend才存储attention。此外，为了减少显存消耗，h*w 过大的attn不储存
         if self.local_blend and len(self.ref_attention_store[key]) <= self.store_place_layers[key] and attn_base.shape[1] <= 32 ** 2:
             self.ref_attention_store[key].append(attn_base)
             self.attention_store[key].append(attn)
@@ -259,10 +302,16 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
             h = attn.shape[0] // (self.batch_size)
             attn = attn.reshape(self.batch_size, h, *attn.shape[1:])
             attn_replace = attn[:]
+            # key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
+            # attn_base = self.attn_store[self.cur_step][key][self.place_layers[key]].to(attn.device)
+            #print(attn.shape, attn_base.shape, key)
+            # attn_base = attn_base.reshape(self.batch_size, h, *attn_base.shape[1:])
+            # print(attn.shape, attn_base.shape, attn_replace.shape)
 
             if is_cross:
+                # if self.cur_step == 51:
+                #     self.cur_step = len(self.cross_replace_alpha)-1
                 alpha_words = self.cross_replace_alpha[self.cur_step]
-                # 将对应的需要替换的attn更改为ref attn
                 attn_repalce_new = self.replace_cross_attention(attn_base, attn_replace) * alpha_words + (1 - alpha_words) * attn_replace
                 attn = attn_repalce_new
                 #print("cross")
@@ -291,17 +340,15 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                  local_blend: Optional[LocalBlend], device: int=0, is_store: List[int]=None):
         super(AttentionControlEdit, self).__init__(tokenizer, device, is_store)
         self.device = device
+        self.attention_store = self.get_empty_store()
         self.batch_size = len(prompts) - 1
-        # 得到cross attn repalce的替换alpha
         self.cross_replace_alpha = ptp_utils.get_time_words_attention_alpha(prompts, num_steps, cross_replace_steps, tokenizer).to(device)
         if type(self_replace_steps) is float:
             self_replace_steps = 0, self_replace_steps
         self.num_self_replace = int(num_steps * self_replace_steps[0]), int(num_steps * self_replace_steps[1])
         self.local_blend = local_blend
-        # ref attn，即AttentionStore类里的self.all_attn_store
         self.ref_all_attn_store = ref_all_attn_store
         self.ref_attention_store = self.get_empty_store()
-        # 默认AttentionControlEdit类不需要存储全部attention，is_store=None
         self.is_store = is_store
         self.prompts = prompts
 
@@ -318,35 +365,35 @@ class AttentionReplace(AttentionControlEdit):
         self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer).to(device)
 
 
-# refine和reweight还未修改，暂时用不上
-# class AttentionRefine(AttentionControlEdit):
 
-#     def replace_cross_attention(self, attn_base, att_replace):
-#         attn_base_replace = attn_base[:, :, self.mapper].permute(2, 0, 1, 3)
-#         attn_replace = attn_base_replace * self.alphas + att_replace * (1 - self.alphas)
-#         return attn_replace
+class AttentionRefine(AttentionControlEdit):
 
-#     def __init__(self, tokenizer, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
-#                  local_blend: Optional[LocalBlend] = None):
-#         super(AttentionRefine, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
-#         self.mapper, alphas = seq_aligner.get_refinement_mapper(prompts, tokenizer)
-#         self.mapper, alphas = self.mapper.to(device), alphas.to(device)
-#         self.alphas = alphas.reshape(alphas.shape[0], 1, 1, alphas.shape[1])
+    def replace_cross_attention(self, attn_base, att_replace):
+        attn_base_replace = attn_base[:, :, self.mapper].permute(2, 0, 1, 3)
+        attn_replace = attn_base_replace * self.alphas + att_replace * (1 - self.alphas)
+        return attn_replace
+
+    def __init__(self, tokenizer, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
+                 local_blend: Optional[LocalBlend] = None):
+        super(AttentionRefine, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
+        self.mapper, alphas = seq_aligner.get_refinement_mapper(prompts, tokenizer)
+        self.mapper, alphas = self.mapper.to(device), alphas.to(device)
+        self.alphas = alphas.reshape(alphas.shape[0], 1, 1, alphas.shape[1])
 
 
-# class AttentionReweight(AttentionControlEdit):
+class AttentionReweight(AttentionControlEdit):
 
-#     def replace_cross_attention(self, attn_base, att_replace):
-#         if self.prev_controller is not None:
-#             attn_base = self.prev_controller.replace_cross_attention(attn_base, att_replace)
-#         attn_replace = attn_base[None, :, :, :] * self.equalizer[:, None, None, :]
-#         return attn_replace
+    def replace_cross_attention(self, attn_base, att_replace):
+        if self.prev_controller is not None:
+            attn_base = self.prev_controller.replace_cross_attention(attn_base, att_replace)
+        attn_replace = attn_base[None, :, :, :] * self.equalizer[:, None, None, :]
+        return attn_replace
 
-#     def __init__(self, tokenizer, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float, equalizer,
-#                 local_blend: Optional[LocalBlend] = None, controller: Optional[AttentionControlEdit] = None):
-#         super(AttentionReweight, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
-#         self.equalizer = equalizer.to(device)
-#         self.prev_controller = controller
+    def __init__(self, tokenizer, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float, equalizer,
+                local_blend: Optional[LocalBlend] = None, controller: Optional[AttentionControlEdit] = None):
+        super(AttentionReweight, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
+        self.equalizer = equalizer.to(device)
+        self.prev_controller = controller
 
 
 def get_equalizer(tokenizer, text: str, word_select: Union[int, Tuple[int, ...]], values: Union[List[float],
@@ -360,18 +407,16 @@ def get_equalizer(tokenizer, text: str, word_select: Union[int, Tuple[int, ...]]
         equalizer[:, inds] = values
     return equalizer
 
-
-# 将AttentionStore的attn聚合平均，变为(b, h, w, seq)，seq即tokens length=77
 def aggregate_attention(prompts, attention_store: AttentionStore, res: int, from_where: List[str], is_cross: bool, select: int):
-
+    # print(attention_store.attention_store)
     attention_maps = attention_store.get_average_attention()
+    # print(attention_maps[f"{from_where[0]}_{'cross' if is_cross else 'self'}"])
     frames = 16
     for item in attention_maps[f"{from_where[0]}_{'cross' if is_cross else 'self'}"]:
         frames = item.shape[0]//8
         break
     out = [[] for _ in range(frames)]
     num_pixels = res ** 2
-    print(prompts)
     for location in from_where:
         for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
             # print(item.shape)
@@ -391,7 +436,7 @@ def aggregate_attention(prompts, attention_store: AttentionStore, res: int, from
     # out = out.sum(0) / out.shape[0]
     return out
 
-# 可视化所有steps的cross attention map平均之后的结果
+
 def show_cross_attention(prompts, attention_store: AttentionStore, res: int, from_where: List[str], select: int = 0, save_dir="./p2p_vis"):
     tokens = attention_store.tokenizer.encode(prompts[select])
     decoder = attention_store.tokenizer.decode
@@ -437,7 +482,6 @@ def show_self_attention_comp(prompts, attention_store: AttentionStore, res: int,
         images.append(image)
     ptp_utils.view_images(np.concatenate(images, axis=1))
 
-# 可视化单层的attention map
 def show_single_attn(attn, prompts, tokenizer, select=0, save_dir="./p2p_vis/single_attn", save_name="attn_vis.png", save_res=256):
     print(f"attn shape is {attn.shape}")
     if isinstance(prompts, str):

@@ -1,0 +1,321 @@
+{
+  "name": "sample",
+  "path": "/home/jianshu/code/prompt_travel/data/models/sd/cyberrealistic_v33.safetensors",
+  "vae_path": "",
+  "motion_module": "/home/jianshu/code/prompt_travel/data/models/motion-module/mm_sd_v15_v2.ckpt",
+  "compile": false,
+  "tensor_interpolation_slerp": true,
+  "seed": [
+    8888
+  ],
+  "scheduler": "ddim",
+  "steps": 20,
+  "guidance_scale": 7.5,
+  "unet_batch_size": 2,
+  "clip_skip": 1,
+  "prompt_fixed_ratio": 1.0,
+  "head_prompt": "((best quality)), ((masterpiece)), ((realistic)), solo, 1girl, beautiful girl, shorts, white tank top, dancing, smiling, high-resolution, 4k",
+  "prompt_map": {
+    "0": ""
+  },
+  "tail_prompt": "",
+  "n_prompt": [
+    "- CyberRealistic_Negative-neg, 2girl, multiple girls, multiple others, 7 arms,8 arms,4 arms"
+  ],
+  "is_single_prompt_mode": false,
+  "lora_map": {},
+  "motion_lora_map": {},
+  "ip_adapter_map": {
+    "enable": false,
+    "input_image_dir": "../stylize/mp4_2/00_ipadapter",
+    "prompt_fixed_ratio": 0.5,
+    "save_input_image": true,
+    "resized_to_square": false,
+    "scale": 0.5,
+    "is_plus_face": false,
+    "is_plus": true,
+    "is_light": false
+  },
+  "img2img_map": {
+    "enable": false,
+    "init_img_dir": "../stylize/mp4_2/00_img2img",
+    "save_init_image": true,
+    "denoising_strength": 0.7
+  },
+  "region_map": {},
+  "controlnet_map": {
+    "input_image_dir": "/home/jianshu/code/prompt_travel/stylize/course3_1227/2023-12-26T21-56-18-sample-cyberrealistic_v33/00_detectmap",
+    "max_samples_on_vram": 200,
+    "max_models_on_vram": 3,
+    "save_detectmap": true,
+    "preprocess_on_gpu": true,
+    "is_loop": false,
+    "controlnet_tile": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_densepose_ma": {
+      "enable": false,
+      "use_preprocessor": false,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_densepose": {
+      "enable": false,
+      "use_preprocessor": false,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_ip2p": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 0.5,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_lineart_anime": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_openpose": {
+      "enable": true,
+      "use_preprocessor": false,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_softedge": {
+      "enable": false,
+      "use_preprocessor": true,
+      "preprocessor": {
+        "type": "softedge_pidsafe",
+        "param": {}
+      },
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_shuffle": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_depth": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_canny": {
+      "enable": false,
+      "use_preprocessor": false,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_inpaint": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_lineart": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_mlsd": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_normalbae": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_scribble": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_seg": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "qr_code_monster_v1": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "qr_code_monster_v2": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_mediapipe_face": {
+      "enable": false,
+      "use_preprocessor": true,
+      "guess_mode": false,
+      "controlnet_conditioning_scale": 1.0,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0,
+      "control_scale_list": []
+    },
+    "controlnet_ref": {
+      "enable": false,
+      "ref_image": "ref_image/ref_sample.png",
+      "attention_auto_machine_weight": 0.3,
+      "gn_auto_machine_weight": 0.3,
+      "style_fidelity": 0.5,
+      "reference_attn": true,
+      "reference_adain": false,
+      "scale_pattern": [
+        1.0
+      ]
+    }
+  },
+  "upscale_config": {
+    "scheduler": "k_dpmpp_sde",
+    "steps": 20,
+    "strength": 0.5,
+    "guidance_scale": 10,
+    "controlnet_tile": {
+      "enable": false,
+      "controlnet_conditioning_scale": 1.0,
+      "guess_mode": false,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0
+    },
+    "controlnet_line_anime": {
+      "enable": false,
+      "controlnet_conditioning_scale": 1.0,
+      "guess_mode": false,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0
+    },
+    "controlnet_ip2p": {
+      "enable": false,
+      "controlnet_conditioning_scale": 0.5,
+      "guess_mode": false,
+      "control_guidance_start": 0.0,
+      "control_guidance_end": 1.0
+    },
+    "controlnet_ref": {
+      "enable": false,
+      "use_frame_as_ref_image": false,
+      "use_1st_frame_as_ref_image": false,
+      "ref_image": "ref_image/path_to_your_ref_img.jpg",
+      "attention_auto_machine_weight": 1.0,
+      "gn_auto_machine_weight": 1.0,
+      "style_fidelity": 0.25,
+      "reference_attn": true,
+      "reference_adain": false
+    }
+  },
+  "stylize_config": {
+    "original_video": {
+      "path": "/raid/cvg_data/lurenjie/animatediff-cli-prompt-travel/projects/kemu3_girl/kemu3_girl_16.mp4",
+      "aspect_ratio": -1.0,
+      "offset": 0
+    },
+    "create_mask": [
+      "person"
+    ],
+    "composite": {
+      "fg_list": [
+        {
+          "path": " absolute path to frame dir ",
+          "mask_path": " absolute path to mask dir (this is optional) ",
+          "mask_prompt": "person"
+        },
+        {
+          "path": " absolute path to frame dir ",
+          "mask_path": " absolute path to mask dir (this is optional) ",
+          "mask_prompt": "cat"
+        }
+      ],
+      "bg_frame_dir": "Absolute path to the BG frame directory",
+      "hint": ""
+    },
+    "0": {
+      "width": 768,
+      "height": 1024,
+      "length": 170,
+      "context": 16,
+      "overlap": 4,
+      "stride": 0
+    }
+  },
+  "output": {
+    "format": "gif",
+    "fps": 10,
+    "encode_param": {
+      "crf": 10
+    }
+  },
+  "result": {}
+}
