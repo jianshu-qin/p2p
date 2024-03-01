@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import sys
+import os
 import numpy as np
 import torch
 from diffusers.configuration_utils import FrozenDict
@@ -42,6 +44,8 @@ from animatediff.utils.util import (end_profile,
                                     get_tensor_interpolation_method, show_gpu,
                                     start_profile, stopwatch_record,
                                     stopwatch_start, stopwatch_stop)
+sys.path.append("/home/jianshu/code/prompt_travel")
+import p2p.warp as warp
 
 logger = logging.getLogger(__name__)
 
@@ -2338,9 +2342,10 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         replace_bg_steps = [-1, -1],
         ref_fg_latents = None,
         warp_fg_steps = [-1, -1],
-        num_inverse_steps = -1,
+        motion_module_start_step = -1,
         motion_module_path = None,
         mask_path="",
+        warp_correspondence_path="",
         **kwargs,
     ):
         global C_REF_MODE
@@ -2667,7 +2672,7 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             for i, t in enumerate(timesteps):
                 stopwatch_start()
                 cur_i = i
-                if num_inverse_steps != -1 and i == num_inverse_steps:
+                if motion_module_start_step != -1 and i == motion_module_start_step:
                     # load the motion module weights
                     if motion_module_path.exists() and motion_module_path.is_file():
                         logger.info(f"Loaded motion module from {motion_module_path} at {cur_i} step")
@@ -2979,7 +2984,7 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                         # print(f"__lat shape is{__lat.shape}")
                         # print(f"encoder_hidden_states shape is{__cur_prompt.shape}")
 
-                        if p2p_prompts is not None or (uncondition_embeddings is not None and i < num_inverse_steps):
+                        if p2p_prompts is not None or (uncondition_embeddings is not None and i < motion_module_start_step):
                             __cur_prompt = prompt_embeds_list[cur_i]
 
                         else:
@@ -3046,21 +3051,38 @@ class MyAnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
 
                 # do bg/fg latents blend
+                
                 if ref_bg_latents and controller and replace_bg_steps[0] <= cur_i < replace_bg_steps[1]:
                     if cur_i == replace_bg_steps[0]:
                         print(f"start replace bg at step {cur_i}")
                     elif cur_i == replace_bg_steps[1]-1:
                         print(f"end replace bg at step {cur_i}")
                     latents = rearrange(latents, "b c f h w -> (b f) c h w")
-                    latents = torch.cat([ref_bg_latents[i], latents])
+                    latents = torch.cat([ref_bg_latents[i].to(latents.dtype), latents])
                     latents = controller.step_callback(latents, mask_path=mask_path)
-                
-                    if ref_fg_latents:
-                        fg_lat = rearrange(ref_fg_latents[i], "b c f h w -> (b f) c h w")
-                        latents = torch.cat([fg_lat, latents])
-                        latents = controller.step_callback(latents, mask_path=mask_path, is_fg=True)
-
+                    # if ref_fg_latents:
+                        # fg_lat = rearrange(ref_fg_latents[i], "b c f h w -> (b f) c h w")
+                        # latents = torch.cat([fg_lat, latents])
+                        # latents = controller.step_callback(latents, mask_path=mask_path, is_fg=True)
                     latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
+                
+                if ref_fg_latents and warp_fg_steps[0] <= cur_i < warp_fg_steps[1]:
+                    if cur_i == warp_fg_steps[0]:
+                        print(f"start warp fg at step {cur_i}")
+                    elif cur_i == warp_fg_steps[1]-1:
+                        print(f"end warp fg at step {cur_i}")
+                    latents = rearrange(latents, "b c f h w -> (b f) c h w")
+                    ref_fg_latents[cur_i] = ref_fg_latents[cur_i].to(latents.dtype)
+                    csv_list = sorted(os.listdir(warp_correspondence_path))
+                    # read correspodence from csv file and warp
+                    for i in range(video_length):
+                        correspondence = warp.read_csv_correspondence(os.path.join(warp_correspondence_path, csv_list[i]))
+                        for x, y, m, n in correspondence:
+                            latents[i,:, y,x] = ref_fg_latents[cur_i][:,:,n, m]
+                    latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
+                    
+
+                
 
                 all_steps_latents.append(latents.detach())
 

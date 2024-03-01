@@ -38,15 +38,18 @@ class LocalBlend:
         has_save = False
         w1_list = []
         w2_list = []
-        # num of replacing bg/fg steps
-        total_steps = 20
+        total_steps = self.total_steps
+        # w1 is bg latents blend weight, the larger w1 is, the more ref_bg latents blend
         w1_start, w1_end = 0.9, 0.1
+        # w2 is fg latents blend weight, the larger w2 is, the more ref_fg latents blend
         w2_start, w2_end = 0.5, 0.1
         for i in range(total_steps):
             w1_list.append(w1_start-(w1_start-w1_end)*i/total_steps)
             w2_list.append(w2_start-(w2_start-w2_end)*i/total_steps)
-        if self.counter > self.start_blend:
+        if (is_fg and self.w2_counter > self.start_blend) or (not is_fg and self.w1_counter > self.start_blend):
             batchsize, _, height, width = x_t.shape
+            # original p2p latents blend, by using the attention map's shape
+            # in our method, aborted
             if not mask_path:
                 maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
                 maps = [item.reshape(self.alpha_layers.shape[0]-1, -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
@@ -60,6 +63,7 @@ class LocalBlend:
                 if self.substruct_layers is not None:
                     maps_sub = ~self.get_mask(x_t, maps, self.substruct_layers, False)
                     mask = mask * maps_sub
+            # load mask and blend
             elif self.mask == None:
                 mask_list = []
                 if os.path.isdir(mask_path):
@@ -95,18 +99,23 @@ class LocalBlend:
                 #         img.save("stylize/warp_test/local_blend_mask.png")
                 #     has_save = True
 
-            w1 = w1_list[self.counter//2]
-            w2 = w2_list[self.counter//2]
+            # bg latents blend
             if not is_fg:
+                w1 = w1_list[self.w1_counter]
                 print("w1: ",w1)
                 bg, x_t = x_t[:1], x_t[1:]
                 x_t = w1 * bg + (1-w1)*x_t + w1 * self.mask * (x_t - bg)
+            # fg latents blend
             else:
+                w2 = w2_list[self.w2_counter]
                 print("w2: ",w2)
                 fg, x_t = x_t[:batchsize//2], x_t[batchsize//2:]
                 fg_mask = 1.-self.mask
                 x_t = w2 * fg + (1-w2)*x_t + w2 * fg_mask * (x_t - fg)
-        self.counter += 1
+        if is_fg:
+            self.w2_counter += 1
+        else:
+            self.w1_counter += 1
         return x_t
 
     def __init__(self, tokenizer, ddim_steps, prompts: List[str], words: [List[List[str]]], substruct_words=None, start_blend=-1, th=(.3, .3)):
@@ -134,6 +143,9 @@ class LocalBlend:
         self.counter = 0
         self.th=th
         self.mask = None
+        self.total_steps = ddim_steps
+        self.w1_counter = 0
+        self.w2_counter = 0
 
 class AttentionControl(abc.ABC):
 

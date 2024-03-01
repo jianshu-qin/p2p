@@ -4,7 +4,7 @@ import os.path
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Optional, List
+from typing import Annotated, List, Optional
 
 import torch
 import typer
@@ -34,13 +34,14 @@ from animatediff.utils.util import (extract_frames, is_v2_motion_module,
                                     save_video,
                                     set_tensor_interpolation_method)
 from animatediff.utils.wild_card import replace_wild_card
+
 sys.path.append("/home/jianshu/code/prompt_travel")
-import p2p.ptp_utils
-import p2p.p2p
-import p2p.nti
-import p2p.pipeline
 from diffusers import DDIMScheduler
 
+import p2p.nti
+import p2p.p2p
+import p2p.pipeline
+import p2p.ptp_utils
 
 cli: typer.Typer = typer.Typer(
     context_settings=dict(help_option_names=["-h", "--help"]),
@@ -285,44 +286,44 @@ def generate(
             help="Show version",
         ),
     ] = None,
-    ori_prompts: Annotated[
+    ref_bg_latents_path: Annotated[
         str,
         typer.Option(
-            "--ori_prompts",
-            "-p1",
+            "--ref_bg_latents",
+            "-bg",
+            help="path to load reference bg latents, the latents can be generated and saved by running 'test_p2p_c.py'", 
         ),
-    ] = "a photo of a living room, 4k, HD",
-    replace_prompts: Annotated[
+    ] = "/home/jianshu/code/prompt_travel/xt_unc/bg_latents.pt",
+    ref_fg_latents_path: Annotated[
         str,
         typer.Option(
-            "--replace_prompts",
-            "-p2",
+            "--ref_fg_latents",
+            "-fg",
+            help="path to load reference fg latents, the latents can be generated and saved by null-text inversion", 
         ),
-    ] = "a girl in beige top, black skirt, black boots, stands still with arms hanging straight on her sides",
-    inverse: Annotated[
-        int,
-        typer.Option(
-            "--inverse",
-        ),
-    ] = 1,
-    edit: Annotated[
-        int,
-        typer.Option(
-            "--edit",
-        ),
-    ] = 0,
+    ] = "/home/jianshu/code/prompt_travel/xt_unc/rec_girl_fg_latents.pt",
     motion_module_start_step: Annotated[
         int,
         typer.Option(
             "--motion_step",
+            help="which step to load animatediff's motion module", 
         ),
-    ] = 20,
+    ] = 0,
     mask_path: Annotated[
         str,
         typer.Option(
             "--mask_path",
+            help="path to load bg's mask, the masks generated from densepose", 
         ),
     ] = "/home/jianshu/code/prompt_travel/stylize/replace_bg_video/mask_dilate",
+    warp_correspondence_path: Annotated[
+        str,
+        typer.Option(
+            "--warp_correspondence_path",
+            "-warp_path",
+            help="path to load fg's warp correspondence", 
+        ),
+    ] = "/home/jianshu/code/prompt_travel/stylize/warp_fg/warp_csv",
 ):
     """
     Do the thing. Make the animation happen. Waow.
@@ -383,82 +384,91 @@ def generate(
 
     load_controlnet_models(pipe=g_pipeline, model_config=model_config)
 
-    scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
-    if inverse or edit:
-        g_pipeline.scheduler = scheduler
-    
-    MODEL = "/home/jianshu/code/prompt_travel/data/models/sd/cyberrealistic_v33.safetensors"
-    pipe = p2p.pipeline.ReconstructStableDiffusionPipeline.from_single_file(MODEL, torch_dtype=torch.float16,use_safetensors=True).to(device)
-    pipe.scheduler = scheduler
-    pipe.disable_xformers_memory_efficient_attention()
-    pipe.safety_checker = None
-    sample_steps = model_config.steps
-    
+    # scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+    # if inverse or edit:
+    #     g_pipeline.scheduler = scheduler
+
+    # MODEL = "/home/jianshu/code/prompt_travel/data/models/sd/cyberrealistic_v33.safetensors"
+    # pipe = p2p.pipeline.ReconstructStableDiffusionPipeline.from_single_file(MODEL, torch_dtype=torch.float32,use_safetensors=True).to(device)
+    # pipe.scheduler = scheduler
+    # pipe.disable_xformers_memory_efficient_attention()
+    # pipe.safety_checker = None
+    # sample_steps = model_config.steps
+
     # generate background and save bg latents
-    bg_prompts = ori_prompts
-    x_t = torch.randn(
-        (1, pipe.unet.in_channels, height // 8, width // 8),
-        generator=torch.Generator().manual_seed(8888),
-        dtype=torch.float16
-    ).to(device)
-    images, bg_latents = pipe(
-        prompt=bg_prompts, 
-        latents=x_t, 
-        height=height, 
-        width=width, 
-        num_inference_steps=model_config.steps, 
-        #uncond_embeddings=uncond_embeddings, 
-        #num_inverse_steps=50,
-    )
-    images[0].save(os.path.join(out_dir, "bg.png"))
+    # bg_prompts = ori_prompts
+    # x_t = torch.randn(
+    #     (1, pipe.unet.in_channels, height // 8, width // 8),
+    #     generator=torch.Generator().manual_seed(8888),
+    #     dtype=pipe.unet.dtype
+    # ).to(device)
+    # images, bg_latents = pipe(
+    #     prompt=bg_prompts,
+    #     latents=x_t,
+    #     height=height,
+    #     width=width,
+    #     num_inference_steps=model_config.steps,
+    #     #uncond_embeddings=uncond_embeddings,
+    #     #num_inverse_steps=50,
+    # )
+    # print(bg_latents[0].shape)
+    # torch.save(bg_latents, "bg_latents.pt")
+    
+    # images[0].save(os.path.join(out_dir, "bg.png"))
 
+    # load reference  bg latents
+    bg_latents = torch.load(ref_bg_latents_path, map_location=device)
     # set replace bg steps,[0, 0] means don't replace
-    replace_bg_steps = [0,20]
+    replace_bg_steps = [0, model_config.steps]
+    # load reference fg latents
+    ref_fg_latents = torch.load(ref_fg_latents_path, map_location=device)
+    # set warp fg steps,[0, 0] means don't replace
+    warp_fg_steps = [0, model_config.steps]
 
-    x_t, uncond_embeddings = None, None
-    if inverse:
-        x_t, uncond_embeddings = torch.load("xt_unc/xt_girl_768_1024_50.pt").to(device), torch.load("xt_unc/unc_girl_768_1024_50.pt")
-    # elif edit:
-        x_t = torch.randn(
-            (1, pipe.unet.in_channels, height // 8, width // 8),
-            generator=torch.Generator().manual_seed(8888),
-            dtype=torch.float32
-        ).to(device)
+    # x_t, uncond_embeddings = None, None
+    # if inverse:
+    #     x_t, uncond_embeddings = torch.load("xt_unc/xt_girl_768_1024_50.pt").to(device), torch.load("xt_unc/unc_girl_768_1024_50.pt")
+    # # elif edit:
+    #     x_t = torch.randn(
+    #         (1, pipe.unet.in_channels, height // 8, width // 8),
+    #         generator=torch.Generator().manual_seed(8888),
+    #         dtype=torch.float32
+    #     ).to(device)
 
     # for prompt2prompts edit, aborted
-    if edit:
-        store_controller = p2p.p2p.AttentionStore(pipe.tokenizer)
-        # p2p.ptp_utils.register_attention_control(pipe, store_controller)
-        # images, fg_latents = pipe(
-        #     prompt=ori_prompts, 
-        #     latents=x_t, 
-        #     height=height, 
-        #     width=width, 
-        #     num_inference_steps=sample_steps, 
-        #     uncond_embeddings=uncond_embeddings, 
-        #     num_inverse_steps=50,
-        # )
-        # images[0].save(os.path.join(out_dir, "rec_girl.png"))
+    # if edit:
+    #     store_controller = p2p.p2p.AttentionStore(pipe.tokenizer)
+    #     # p2p.ptp_utils.register_attention_control(pipe, store_controller)
+    #     images, ref_fg_latents = pipe(
+    #         prompt=replace_prompts,
+    #         latents=x_t,
+    #         height=height,
+    #         width=width,
+    #         num_inference_steps=sample_steps,
+    #         uncond_embeddings=uncond_embeddings,
+    #         num_inverse_steps=50,
+    #     )
+    #     images[0].save(os.path.join(out_dir, "rec_girl.png"))
 
-        replace_controller = []
-        p2p_prompts = [ori_prompts] + [replace_prompts] * length
-        for i in range(4):
-            replace_controller.append(p2p.p2p.AttentionReplace(store_controller.all_attn_store, pipe.tokenizer, p2p_prompts[:5], sample_steps, cross_replace_steps=.8, self_replace_steps=0.4, local_blend=None, device=device))
-            
-        # p2p.ptp_utils.register_attention_control(g_pipeline, replace_controller)
-        p2p_prompts = p2p_prompts[1:]
-    else:
-        # p2p_prompts = [ori_prompts] * (length+1)
-        p2p_prompts =  None
+    #     replace_controller = []
+    #     p2p_prompts = [ori_prompts] + [replace_prompts] * length
+    #     for i in range(4):
+    #         replace_controller.append(p2p.p2p.AttentionReplace(store_controller.all_attn_store, pipe.tokenizer, p2p_prompts[:5], sample_steps, cross_replace_steps=.8, self_replace_steps=0.4, local_blend=None, device=device))
+
+    #     # p2p.ptp_utils.register_attention_control(g_pipeline, replace_controller)
+    #     p2p_prompts = p2p_prompts[1:]
+    # else:
+    #     # p2p_prompts = [ori_prompts] * (length+1)
+    #     p2p_prompts =  None
     # del pipe
 
-    # only use controller's blender for bg and fg blend
-    store_controller = p2p.p2p.AttentionStore(pipe.tokenizer)
-    # p2p_prompts = [ori_prompts] + [replace_prompts] * length
-    p2p_prompts = [ori_prompts]*length
-    lb = p2p.p2p.LocalBlend(pipe.tokenizer, ddim_steps=sample_steps, prompts=p2p_prompts[0:1]*2,
+    
+
+    # only use controller's blender for bg blend, prompts not use
+    p2p_prompts = ["none prompts"] * (length+1)
+    lb = p2p.p2p.LocalBlend(g_pipeline.tokenizer, ddim_steps=model_config.steps, prompts=p2p_prompts[0:1]*2,
                         words=(("girl", ), ("girl", )))
-    replace_controller = p2p.p2p.AttentionReplace(store_controller.all_attn_store, pipe.tokenizer, p2p_prompts[:5], sample_steps, cross_replace_steps=.8, self_replace_steps=0.4, local_blend=lb, device=device)
+    replace_controller = p2p.p2p.AttentionReplace(None, g_pipeline.tokenizer, p2p_prompts, model_config.steps, cross_replace_steps=.8, self_replace_steps=0.4, local_blend=lb, device=device)
 
     if g_pipeline.device == device:
         logger.info("Pipeline already on the correct device, skipping device transfer")
@@ -466,12 +476,8 @@ def generate(
         g_pipeline = send_to_device(
             g_pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile
         )
-    if inverse:
-        g_pipeline.unet = g_pipeline.unet.to(dtype=torch.float32)
-        g_pipeline.text_encoder = g_pipeline.text_encoder.to(dtype=torch.float32)
 
-    # load reference fg latents 
-    ref_fg_latents = torch.load(f"video_fg_all_{model_config.steps}steps_latents.pt",map_location=device)
+    
     # whether to save ref_fg_latents
     save_all_steps_latents = False
     # save some intermediate results for visualize the denoising process, results will be saved to out_dir/show_all/
@@ -520,7 +526,7 @@ def generate(
             seed = model_config.seed[idx % num_seeds]
 
             logger.info(f"Generation seed: {seed}")
-            
+
             output = run_inference(
                 pipeline=g_pipeline,
                 n_prompt=n_prompt,
@@ -549,25 +555,25 @@ def generate(
                 output_map = model_config.output,
                 is_single_prompt_mode=model_config.is_single_prompt_mode,
 
-                # our project args is on the below 
+                # our project args is on the below
                 # init latents
-                init_latents = x_t,  
-                #p2p_prompts = p2p_prompts,
-                #null-text inversion
-                uncondition_embeddings = uncond_embeddings, 
-                #p2p controller,now only use its blender
-                controller = replace_controller, 
+                # init_latents = x_t,
+                # p2p_prompts = p2p_prompts,
+                # null-text inversion
+                # uncondition_embeddings = uncond_embeddings,
+                # p2p controller,now only use its blender
+                controller = replace_controller,
                 ref_bg_latents = bg_latents,
                 replace_bg_steps = replace_bg_steps,
                 ref_fg_latents = ref_fg_latents,
-                # warp_fg_steps = warp_fg_steps,
-                #null-text inversion's inverse steps
-                num_inverse_steps = motion_module_start_step, 
+                warp_fg_steps = warp_fg_steps,
                 # which step to load motion module
-                motion_module_path=get_dir("data").joinpath(model_config.motion_module), 
+                motion_module_start_step = motion_module_start_step,
+                motion_module_path=get_dir("data").joinpath(model_config.motion_module),
                 save_all_steps_latents=save_all_steps_latents,
                 save_noisy_images_list=save_noisy_images_list,
                 mask_path=mask_path,
+                warp_correspondence_path=warp_correspondence_path,
             )
             outputs.append(output)
             torch.cuda.empty_cache()

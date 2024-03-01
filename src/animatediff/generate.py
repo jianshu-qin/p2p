@@ -1164,11 +1164,12 @@ def run_inference(
     replace_bg_steps = [-1, -1],
     ref_fg_latents = None,
     warp_fg_steps = [-1, -1],
-    num_inverse_steps = -1,
+    motion_module_start_step = -1,
     motion_module_path = None,
     save_all_steps_latents=False,
     save_noisy_images_list=[],
     mask_path="",
+    warp_correspondence_path="",
 ):
     out_dir = Path(out_dir)  # ensure out_dir is a Path
 
@@ -1235,13 +1236,16 @@ def run_inference(
             replace_bg_steps = replace_bg_steps,
             ref_fg_latents = ref_fg_latents,
             warp_fg_steps = warp_fg_steps,
-            num_inverse_steps = num_inverse_steps,
+            motion_module_start_step = motion_module_start_step,
             motion_module_path = motion_module_path,
             mask_path=mask_path,
+            warp_correspondence_path=warp_correspondence_path,
         )
+
+        # save the video latents
         if save_all_steps_latents:
-            torch.save(all_steps_latents, "video_fg_all_20steps_latents.pt")
-        
+            torch.save(all_steps_latents, out_dir.joinpath("video_all_steps_latents.pt"))
+        # save the chosen noisy images
         for i in save_noisy_images_list:
             all_steps_latents[i] = pipeline.decode_latents(all_steps_latents[i])
             all_steps_latents[i] = torch.from_numpy(all_steps_latents[i])
